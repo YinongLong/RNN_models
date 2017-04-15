@@ -11,6 +11,7 @@ from __future__ import print_function
 import numpy as np
 import char_level_lm
 
+
 class LSTM(object):
     """
     实现Long Short-Term Memory
@@ -18,28 +19,40 @@ class LSTM(object):
 
     def __init__(self, input_size, output_size, cell_size,
                  learning_rate=1.0, num_steps=25):
+        """
+        初始化整个LSTM模型
+        :param input_size: int，输入单元的维数 
+        :param output_size: int，输出单元的维数
+        :param cell_size: int，cell state的维数
+        :param learning_rate: float，学习率
+        :param num_steps: int，模型展开的时间步数
+        """
         self.input_size = input_size
         self.output_size = output_size
         self.cell_size = cell_size
         self.num_steps = num_steps
-        self.cell_state = np.zeros((cell_size, 1))
-        # forget gate parameter
+
+        # forget gate parameter initialization
         self.Wfx = np.random.randn(cell_size, input_size) * 0.1
         self.Wfh = np.random.randn(cell_size, cell_size) * 0.1
         self.bf = np.zeros((cell_size, 1))
-        # input gate parameter
+
+        # input gate parameter initialization
         self.Wix = np.random.randn(cell_size, input_size) * 0.1
         self.Wih = np.random.randn(cell_size, cell_size) * 0.1
         self.bi = np.zeros((cell_size, 1))
-        # candidate cell state parameter
+
+        # candidate cell state parameter initialization
         self.Wcx = np.random.randn(cell_size, input_size) * 0.1
         self.Wch = np.random.randn(cell_size, cell_size) * 0.1
         self.bc = np.zeros((cell_size, 1))
-        # output gate parameter
+
+        # output gate parameter initialization
         self.Wox = np.random.randn(cell_size, input_size) * 0.1
         self.Woh = np.random.randn(cell_size, cell_size) * 0.1
         self.bo = np.zeros((cell_size, 1))
-        # output parameter
+
+        # output parameter initialization
         self.Wy = np.random.randn(output_size, cell_size) * 0.1
         self.by = np.zeros((output_size, 1))
 
@@ -55,25 +68,28 @@ class LSTM(object):
         :param prev_c: 细胞状态
         :return: 
         """
-        xs, fts, its, cts, ots, hts, ats, cs = {}, {}, {}, {}, {}, {}, {}, {}
+        xts, fts, its, cts, ots, hts, ats, cell_states = {}, {}, {}, {}, {}, {}, {}, {}
+
         hts[-1] = np.copy(prev_h)
-        cs[-1] = np.copy(prev_c)
+        cell_states[-1] = np.copy(prev_c)
 
         # 前向传播，计算模型预测结果，以及损失值
         loss = 0.
         for t in range(self.num_steps):
-            xs[t] = np.zeros((self.input_size, 1))
-            xs[t][inputs[t]] = 1
+            xts[t] = np.zeros((self.input_size, 1))
+            xts[t][inputs[t]] = 1
 
-            fts[t] = self._sigmoid(np.dot(self.Wfx, xs[t]) + np.dot(self.Wfh, hts[t-1]) + self.bf)
-            its[t] = self._sigmoid(np.dot(self.Wix, xs[t]) + np.dot(self.Wih, hts[t-1]) + self.bi)
-            cts[t] = np.tanh(np.dot(self.Wcx, xs[t]) + np.dot(self.Wch, hts[t-1]) + self.bc)
-            cs[t] = fts[t] * cs[t-1] + its[t] * cts[t]
-            ots[t] = self._sigmoid(np.dot(self.Wox, xs[t]) + np.dot(self.Woh, hts[t-1]) + self.bo)
-            hts[t] = ots[t] * np.tanh(cs[t])
+            fts[t] = self._sigmoid(np.dot(self.Wfx, xts[t]) + np.dot(self.Wfh, hts[t-1]) + self.bf)
+            its[t] = self._sigmoid(np.dot(self.Wix, xts[t]) + np.dot(self.Wih, hts[t-1]) + self.bi)
+            cts[t] = np.tanh(np.dot(self.Wcx, xts[t]) + np.dot(self.Wch, hts[t-1]) + self.bc)
+            cell_states[t] = fts[t] * cell_states[t-1] + its[t] * cts[t]
+            ots[t] = self._sigmoid(np.dot(self.Wox, xts[t]) + np.dot(self.Woh, hts[t-1]) + self.bo)
+            hts[t] = ots[t] * np.tanh(cell_states[t])
             zt = np.dot(self.Wy, hts[t]) + self.by
             ats[t] = np.exp(zt) / np.sum(np.exp(zt))
             loss += -np.log(ats[t][targets[t], 0])
+
+        fts[self.num_steps] = np.zeros((self.cell_size, 1))
 
         dWfx = np.zeros_like(self.Wfx)
         dWfh = np.zeros_like(self.Wfh)
@@ -99,36 +115,33 @@ class LSTM(object):
         lat_i_delta = np.zeros((self.cell_size, 1))
         lat_o_delta = np.zeros((self.cell_size, 1))
         lat_c_delta = np.zeros((self.cell_size, 1))
+        lat_cell_delta = np.zeros((self.cell_size, 1))
         for t in reversed(range(self.num_steps)):
             target = np.zeros((self.output_size, 1))
             target[targets[t]] = 1
             delta = ats[t] - target
-            # try:
             delta_ht = np.dot(self.Wy.T, delta) + \
                        np.dot(self.Wfh.T, lat_f_delta) + np.dot(self.Wih.T, lat_i_delta) + \
                        np.dot(self.Woh.T, lat_o_delta) + np.dot(self.Wch.T, lat_c_delta)
-            # except Exception:
-            #     print(self.Wy.T.shape, delta.shape)
-            #     return
-            delta_o = ots[t] * (1 - ots[t]) * np.tanh(cs[t]) * delta_ht
-            delta_cell = (1 - cs[t] * cs[t]) * ots[t] * delta_ht
-            delta_f = fts[t] * (1 - fts[t]) * cs[t-1] * delta_cell
+            delta_o = ots[t] * (1 - ots[t]) * np.tanh(cell_states[t]) * delta_ht
+            delta_cell = (1 - cell_states[t] * cell_states[t]) * ots[t] * delta_ht + lat_cell_delta * fts[t+1]
+            delta_f = fts[t] * (1 - fts[t]) * cell_states[t-1] * delta_cell
             delta_i = its[t] * (1 - its[t]) * cts[t] * delta_cell
             delta_c = (1 - cts[t] * cts[t]) * its[t] * delta_cell
 
-            dWfx += np.dot(delta_f, xs[t].T)
+            dWfx += np.dot(delta_f, xts[t].T)
             dWfh += np.dot(delta_f, hts[t-1].T)
             dbf += delta_f
 
-            dWix += np.dot(delta_i, xs[t].T)
+            dWix += np.dot(delta_i, xts[t].T)
             dWih += np.dot(delta_i, hts[t-1].T)
             dbi += delta_i
 
-            dWcx += np.dot(delta_c, xs[t].T)
+            dWcx += np.dot(delta_c, xts[t].T)
             dWch += np.dot(delta_c, hts[t-1].T)
             dbc += delta_c
 
-            dWox += np.dot(delta_o, xs[t].T)
+            dWox += np.dot(delta_o, xts[t].T)
             dWoh += np.dot(delta_o, hts[t-1].T)
             dbo += delta_o
 
@@ -139,6 +152,7 @@ class LSTM(object):
             lat_o_delta = delta_o
             lat_i_delta = delta_i
             lat_f_delta = delta_f
+            lat_cell_delta = delta_cell
 
         # gradient clipping
         for param in [dWfx, dWfh, dWix, dWih, dWcx, dWch, dWox, dWoh, dWy,
@@ -185,7 +199,7 @@ class LSTM(object):
                 grad_analytic = dparam.flat[index]
                 grad_numerical = (lat_loss - pre_loss) / (2 * delta)
                 rel_error = abs(grad_analytic - grad_numerical) / abs(grad_analytic + grad_numerical)
-                print('%f, %f => %e' % (grad_analytic, grad_numerical, rel_error))
+                print('%f, %f => %e %s' % (grad_analytic, grad_numerical, rel_error, name))
 
     def train(self, data, char_to_ix, ix_to_char):
         """
