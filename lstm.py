@@ -18,7 +18,7 @@ class LSTM(object):
     """
 
     def __init__(self, input_size, output_size, cell_size,
-                 learning_rate=1.0, num_steps=25):
+                 learning_rate=0.5, batch_size=128, epoch=10, num_steps=40):
         """
         初始化整个LSTM模型
         :param input_size: int，输入单元的维数 
@@ -31,6 +31,9 @@ class LSTM(object):
         self.output_size = output_size
         self.cell_size = cell_size
         self.num_steps = num_steps
+        self.batch_size = batch_size
+        self.epoch = epoch
+        self.learning_rate = learning_rate
 
         # forget gate parameter initialization
         self.Wfx = np.random.randn(cell_size, input_size) * 0.1
@@ -87,7 +90,11 @@ class LSTM(object):
             hts[t] = ots[t] * np.tanh(cell_states[t])
             zt = np.dot(self.Wy, hts[t]) + self.by
             ats[t] = np.exp(zt) / np.sum(np.exp(zt))
-            loss += -np.log(ats[t][targets[t], 0])
+            try:
+                loss += -np.log(ats[t][targets[t], 0])
+            except Exception:
+                print(ats[t].shape, targets, t)
+
 
         fts[self.num_steps] = np.zeros((self.cell_size, 1))
 
@@ -159,7 +166,7 @@ class LSTM(object):
                       dbf, dbi, dbc, dbo, dby]:
             np.clip(param, -5, 5, out=param)
         return loss, dWfx, dWfh, dWix, dWih, dWcx, dWch, dWox, dWoh, dWy, \
-               dby, dbo, dbc, dbi, dbf
+               dby, dbo, dbc, dbi, dbf, hts[self.num_steps-1], cell_states[self.num_steps-1]
 
     def check_gradients(self, inputs, targets, prev_h, prev_c):
         """
@@ -173,7 +180,7 @@ class LSTM(object):
         num_checks = 10
         delta = 1e-5
         _, dWfx, dWfh, dWix, dWih, dWcx, dWch, dWox, dWoh, dWy, \
-        dby, dbo, dbc, dbi, dbf = self._loss(inputs, targets, prev_h, prev_c)
+        dby, dbo, dbc, dbi, dbf, _, _ = self._loss(inputs, targets, prev_h, prev_c)
         for param, dparam, name in zip([self.Wfx, self.Wfh, self.Wix, self.Wih,
                                         self.Wcx, self.Wch, self.Wox, self.Woh,
                                         self.Wy, self.bf, self.bi, self.bc, self.bo, self.by],
@@ -191,15 +198,35 @@ class LSTM(object):
                 old_val = param.flat[index]
                 param.flat[index] = old_val + delta
                 lat_loss, \
-                _, _, _, _, _, _, _, _, _, _, _, _, _, _ = self._loss(inputs, targets, prev_h, prev_c)
+                _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _ = self._loss(inputs, targets, prev_h, prev_c)
                 param.flat[index] = old_val - delta
                 pre_loss, \
-                _, _, _, _, _, _, _, _, _, _, _, _, _, _ = self._loss(inputs, targets, prev_h, prev_c)
+                _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _ = self._loss(inputs, targets, prev_h, prev_c)
                 param.flat[index] = old_val
                 grad_analytic = dparam.flat[index]
                 grad_numerical = (lat_loss - pre_loss) / (2 * delta)
                 rel_error = abs(grad_analytic - grad_numerical) / abs(grad_analytic + grad_numerical)
                 print('%f, %f => %e %s' % (grad_analytic, grad_numerical, rel_error, name))
+
+    def sample(self, h, cell_state, seed_ix, n=200):
+        x = np.zeros((self.input_size, 1))
+        x[seed_ix] = 1
+        indices = list()
+        indices.append(seed_ix)
+        for t in range(n):
+            ft = self._sigmoid(np.dot(self.Wfx, x) + np.dot(self.Wfh, h) + self.bf)
+            it = self._sigmoid(np.dot(self.Wix, x) + np.dot(self.Wih, h) + self.bi)
+            ct = np.tanh(np.dot(self.Wcx, x) + np.dot(self.Wch, h) + self.bc)
+            cell_state = cell_state * ft + it * ct
+            ot = self._sigmoid(np.dot(self.Wox, x) + np.dot(self.Woh, h) + self.bo)
+            h = ot * np.tanh(cell_state)
+            zt = np.dot(self.Wy, h) + self.by
+            at = np.exp(zt) / np.sum(np.exp(zt))
+            ix = np.random.choice(range(self.output_size), p=at.ravel())
+            x = np.zeros((self.input_size, 1))
+            x[ix] = 1
+            indices.append(ix)
+        return indices
 
     def train(self, data, char_to_ix, ix_to_char):
         """
@@ -208,12 +235,52 @@ class LSTM(object):
         :param ix_to_char: dict，索引到字符的映射
         :return: 
         """
-        p = 0
-        prev_h = np.zeros((self.cell_size, 1))
-        prev_c = np.zeros((self.cell_size, 1))
-        inputs = [char_to_ix[char] for char in data[p:(p+self.num_steps)]]
-        targets = [char_to_ix[char] for char in data[(p+1):(p+self.num_steps+1)]]
-        self.check_gradients(inputs, targets, prev_h, prev_c)
+        len_data = len(data)
+        mWfx, mWfh = np.zeros_like(self.Wfx), np.zeros_like(self.Wfh)
+        mWix, mWih = np.zeros_like(self.Wix), np.zeros_like(self.Wih)
+        mWcx, mWch = np.zeros_like(self.Wcx), np.zeros_like(self.Wch)
+        mWox, mWoh = np.zeros_like(self.Wox), np.zeros_like(self.Woh)
+        mWy = np.zeros_like(self.Wy)
+        mby, mbo, mbc = np.zeros_like(self.by), np.zeros_like(self.bo), np.zeros_like(self.bc)
+        mbi, mbf = np.zeros_like(self.bi), np.zeros_like(self.bf)
+        smooth_loss = -np.log(1.0 / self.output_size) * self.num_steps
+        for i in range(self.epoch):
+            prev_h = np.zeros((self.cell_size, 1))
+            prev_c = np.zeros((self.cell_size, 1))
+            p, n = 0, 0
+            while (p + 1 + self.num_steps) < len_data:
+                inputs = [char_to_ix[char] for char in data[p:(p+self.num_steps)]]
+                targets = [char_to_ix[char] for char in data[(p+1):(p+self.num_steps+1)]]
+                if n % 100 == 0:
+                    sample_ix = self.sample(prev_h, prev_c, inputs[0])
+                    txt = ''.join(ix_to_char[ix] for ix in sample_ix)
+                    print('----------\n%s\n----------' % txt)
+
+                loss, dWfx, dWfh, dWix, dWih, dWcx, dWch, dWox, dWoh, dWy,\
+                dby, dbo, dbc, dbi, dbf, prev_h, prev_c = self._loss(inputs, targets, prev_h, prev_c)
+                smooth_loss = smooth_loss * 0.999 + 0.001 * loss
+                if n % 100 == 0:
+                    print('iter %d, loss %f' % (n, smooth_loss))
+
+                for param, dparam, mem in zip([self.Wfx, self.Wfh, self.bf,
+                                               self.Wix, self.Wih, self.bi,
+                                               self.Wcx, self.Wch, self.bc,
+                                               self.Wox, self.Woh, self.bo,
+                                               self.Wy, self.by],
+                                              [dWfx, dWfh, dbf,
+                                               dWix, dWih, dbi,
+                                               dWcx, dWch, dbc,
+                                               dWox, dWoh, dbo,
+                                               dWy, dby],
+                                              [mWfx, mWfh, mbf,
+                                               mWix, mWih, mbi,
+                                               mWcx, mWch, mbc,
+                                               mWox, mWoh, mbo,
+                                               mWy, mby]):
+                    mem += dparam * dparam
+                    param += -self.learning_rate * dparam / np.sqrt(mem + 1e-8)
+                p += 1
+                n += 1
 
 
 def main():
